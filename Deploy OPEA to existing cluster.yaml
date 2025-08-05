@@ -1,0 +1,259 @@
+formatVersion: 2
+metadata:
+  deploymentSettings:
+    disableUpdateDay2Action: true
+inputs:
+  deploymentType:
+    type: string
+    title: Deployment Type
+    description: Select the desired deployment type
+    enum:
+      - Chatbot with frontend
+      - API backend
+    default: Chatbot with frontend
+  dockerHelmImage:
+    type: string
+    title: Docker helm image
+    default: thephuck/docker-helm:v0.5.1
+  hfModel:
+    type: string
+    title: HuggingFace Model
+    description: Meta-Llama-3.1-8B-Instruct doesn't fit in the Chatbot containers
+    default: meta-llama/Meta-Llama-3-8B-Instruct
+  projectName:
+    type: string
+    title: Existing project name
+    description: The helm chart will be deployed into the existing cluster in a project
+  k8sNS:
+    type: string
+    title: Kubernetes namespace
+    description: Provide a name to build the deployment inside a k8s namespace
+  hfToken:
+    type: string
+    title: HuggingFace token
+    description: HuggingFace token must have access to the model
+    encrypted: true
+  vSpherePassword:
+    type: string
+    title: vSphere Password
+    description: vSphere password
+    encrypted: true
+  opeaVersion:
+    type: string
+    title: OPEA Version
+    description: OPEA branch version
+    enum:
+      - main
+      - v1.2rc
+    default: main
+resources:
+  cciNamespace:
+    type: CCI.Supervisor.Namespace
+    metadata:
+      layoutPosition:
+        - 0
+        - 1
+    properties:
+      name: ${input.projectName}-ns
+      existing: true
+  cciTKC:
+    type: CCI.Supervisor.Resource
+    metadata:
+      layoutPosition:
+        - 0
+        - 0
+    properties:
+      context: ${resource.cciNamespace.id}
+      existing: true
+      manifest:
+        apiVersion: run.tanzu.vmware.com/v1alpha3
+        kind: TanzuKubernetesCluster
+        metadata:
+          name: ${input.projectName}-cl
+  k8sns:
+    type: CCI.TKG.Resource
+    metadata:
+      layoutPosition:
+        - 0
+        - 0
+    properties:
+      context: ${resource.cciTKC.id}
+      manifest:
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: ${input.k8sNS}
+          labels:
+            app: ${env.deploymentName}
+            pod-security.kubernetes.io/enforce: privileged
+  vsphere-password-secret:
+    type: CCI.TKG.Resource
+    metadata:
+      layoutPosition:
+        - 0
+        - 0
+    properties:
+      context: ${resource.k8sns.id}
+      manifest:
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: vsphere-password
+        type: Opaque
+        stringData:
+          VSPHERE_PASSWORD: ${input.vSpherePassword}
+  hfTokenSecret:
+    type: CCI.TKG.Resource
+    metadata:
+      layoutPosition:
+        - 1
+        - 0
+    properties:
+      context: ${resource.k8sns.id}
+      manifest:
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: hf-token
+        type: Opaque
+        stringData:
+          HFTOKEN: ${input.hfToken}
+  opea-lb:
+    type: CCI.TKG.Resource
+    metadata:
+      layoutPosition:
+        - 2
+        - 0
+    properties:
+      context: ${resource.k8sns.id}
+      wait:
+        fields:
+          - indicatesFailure: false
+            path: status.loadBalancer.ingress[0].ip
+            value: '*'
+      manifest:
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: opea-lb
+        spec:
+          type: LoadBalancer
+          selector:
+            app.kubernetes.io/instance: '${input.deploymentType == "API backend" ? ''xeon-llama-8b'' : ''chatqna'' }'
+            app.kubernetes.io/name: '${input.deploymentType == "API backend" ? ''vllm'' : ''nginx'' }'
+          ports:
+            - name: http
+              protocol: TCP
+              port: 80
+              targetPort: '${input.deploymentType == "API backend" ? 2080 : 80 }'
+  helmLB:
+    type: CCI.TKG.Resource
+    metadata:
+      layoutPosition:
+        - 3
+        - 0
+    properties:
+      context: ${resource.k8sns.id}
+      wait:
+        fields:
+          - indicatesFailure: false
+            path: status.loadBalancer.ingress[0].ip
+            value: '*'
+      manifest:
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: docker-helm-lb
+        spec:
+          selector:
+            app: docker-helm
+          type: LoadBalancer
+          ports:
+            - name: tcp-2222
+              port: 2222
+              targetPort: 22
+              protocol: TCP
+  docker-helm:
+    type: CCI.TKG.Resource
+    dependsOn:
+      - helmLB
+      - vsphere-password-secret
+      - hfTokenSecret
+    metadata:
+      layoutPosition:
+        - 4
+        - 0
+    properties:
+      context: ${resource.k8sns.id}
+      manifest:
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: docker-helm
+          labels:
+            app: docker-helm
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: docker-helm
+          template:
+            metadata:
+              labels:
+                app: docker-helm
+            spec:
+              containers:
+                - name: docker-helm
+                  image: ${input.dockerHelmImage}
+                  ports:
+                    - containerPort: 22
+                      protocol: TCP
+                  env:
+                    - name: HFTOKEN
+                      valueFrom:
+                        secretKeyRef:
+                          name: hf-token
+                          key: HFTOKEN
+                    - name: VSPHERE_USERNAME
+                      value: ${env.requestedBy}
+                    - name: VSPHERE_PASSWORD
+                      valueFrom:
+                        secretKeyRef:
+                          name: vsphere-password
+                          key: VSPHERE_PASSWORD
+                    - name: VKS_SUPERVISOR_IP
+                      value: 192.168.240.2
+                    - name: VKS_NAMESPACE
+                      value: ${resource.cciNamespace.name}
+                    - name: VKS_CLUSTER_NAME
+                      value: ${resource.cciTKC.manifest.metadata.name}
+                    - name: K8S_NAMESPACE
+                      value: ${resource.k8sns.manifest.metadata.name}
+                    - name: OPEAVER
+                      value: ${input.opeaVersion}
+                    - name: HFMODEL
+                      value: ${input.hfModel}
+                    - name: APIBACKEND
+                      value: '${input.deploymentType == "API backend" ? ''true'' : ''false'' }'
+outputs:
+  __deploymentOverview:
+    value: |-
+      ## Access the OPEA Q&A Chatbot, or point external front ends to the following:
+      - http://{{resource.opea-lb.object.status.loadBalancer.ingress.[0].ip}}
+
+      ### Kubernetes
+      - Login to Kubernetes via `kubectl`
+          ```
+          kubectl vsphere login --insecure-skip-tls-verify \
+          --server={{resource.cciNamespace.metadata.[infrastructure.cci.vmware.com/wcp-address]}} \
+          --tanzu-kubernetes-cluster-namespace ${resource.cciNamespace.name} \
+          --tanzu-kubernetes-cluster-name ${resource.cciTKC.manifest.metadata.name} \
+          --vsphere-username ${env.requestedBy}
+          ```
+      - Manage Kubernetes and Supervisor Namespace via [Cloud Consumption Interface](/automation/#/service/catalog/consume/cci/projects/${env.projectName}/namespaces/${resource.cciNamespace.name}/summary)
+
+      ### SSH
+      - ssh into the helm container:
+      ```
+      ssh -p 2222 root@{{resource.helmLB.object.status.loadBalancer.ingress.[0].ip}}
+      ```

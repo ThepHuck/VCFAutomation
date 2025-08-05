@@ -1,0 +1,381 @@
+formatVersion: 2
+metadata:
+  deploymentSettings:
+    disableUpdateDay2Action: true
+    hideDisabledDay2Actions: true
+inputs:
+  apiBackend:
+    type: boolean
+    title: Deploy API backend
+    default: false
+  dockerHelmImage:
+    type: string
+    title: Docker helm image
+    default: thephuck/docker-helm:v0.5.1
+  hfModel:
+    type: string
+    title: HuggingFace Model
+    default: meta-llama/Meta-Llama-3-8B-Instruct
+  clCPCount:
+    type: integer
+    title: How many control plane nodes?
+    enum:
+      - 1
+      - 3
+  clCPSize:
+    type: string
+    title: Control plane size
+    description: |-
+      xsmall = 2/2
+      small = 2/4
+      medium = 2/8
+      large = 4/16
+    readOnly: false
+    default: best-effort-xsmall
+    minLength: 1
+    enum:
+      - best-effort-xsmall
+      - best-effort-small
+      - best-effort-medium
+      - best-effort-large
+  clWorkerCount:
+    type: integer
+    title: How many worker nodes?
+    enum:
+      - 1
+      - 2
+      - 3
+      - 4
+  clWorkerSize:
+    type: string
+    title: Worker node size
+    description: |-
+      xsmall = 2/2
+      small = 2/4
+      medium = 2/8
+      large = 4/16
+      xlarge = 4/32
+      2xlarge = 8/64
+      4xlarge = 16/128
+      8xlarge = 32/128
+    readOnly: false
+    default: best-effort-xsmall
+    enum:
+      - best-effort-xsmall
+      - best-effort-small
+      - best-effort-medium
+      - best-effort-large
+      - best-effort-xlarge
+      - best-effort-2xlarge
+      - best-effort-4xlarge
+      - best-effort-8xlarge
+  clStorage:
+    type: integer
+    title: Cluster Additional Storage in GiB
+    default: 10
+    minimum: 10
+    maximum: 500
+  clPodCidrBlock:
+    type: string
+    title: Cluster Pod IP Block
+    description: subnet in CIDR notation
+    default: 10.53.0.0/16
+    pattern: ^([0-9]{1,3}\.)([0-9]{1,3}\.)([0-9]{1,3}\.)([0-9]{1,3}\/)([1-9]{1,2})
+  clServicesCiderBlock:
+    type: string
+    title: Services IP block
+    description: subnet in CIDR notation
+    default: 10.153.0.0/16
+    pattern: ^([0-9]{1,3}\.)([0-9]{1,3}\.)([0-9]{1,3}\.)([0-9]{1,3}\/)([1-9]{1,2})
+  hfToken:
+    type: string
+    title: HuggingFace token
+    description: HuggingFace token must have access to the model
+    encrypted: true
+  vSpherePassword:
+    type: string
+    title: vSphere Password
+    description: vSphere password
+    encrypted: true
+  opeaVersion:
+    type: string
+    title: OPEA Version
+    description: OPEA branch version
+    enum:
+      - main
+      - v1.2
+      - v1.2rc
+      - v1.3rc
+    default: main
+resources:
+  cciNamespace:
+    type: CCI.Supervisor.Namespace
+    metadata:
+      layoutPosition:
+        - 0
+        - 0
+    properties:
+      name: ${env.deploymentName}-ns
+      className: cci-ns-class
+      regionName: cci-region
+  cciTKC:
+    type: CCI.Supervisor.Resource
+    dependsOn:
+      - cciNamespace
+    metadata:
+      layoutPosition:
+        - 0
+        - 0
+    properties:
+      context: ${resource.cciNamespace.id}
+      manifest:
+        apiVersion: run.tanzu.vmware.com/v1alpha3
+        kind: TanzuKubernetesCluster
+        metadata:
+          name: ${env.deploymentName}-cl
+          annotations:
+            run.tanzu.vmware.com/resolve-os-image: os-name=ubuntu
+        spec:
+          topology:
+            controlPlane:
+              replicas: ${input.clCPCount}
+              vmClass: ${input.clCPSize}
+              storageClass: vsan-default-storage-policy
+              tkr:
+                reference:
+                  name: v1.29.4---vmware.3-fips.1-tkg.1
+            nodePools:
+              - name: worker
+                replicas: ${input.clWorkerCount}
+                vmClass: ${input.clWorkerSize}
+                storageClass: vsan-default-storage-policy
+                volumes:
+                  - name: containerd
+                    mountPath: /var/lib/containerd
+                    capacity:
+                      storage: 200Gi
+                # Larger space for pod content if needed
+                  - name: kubelet
+                    mountPath: /var/lib/kubelet
+                    capacity:
+                      storage: ${input.clStorage}Gi
+                tkr:
+                  reference:
+                    name: v1.29.4---vmware.3-fips.1-tkg.1
+          settings:
+            network:
+              cni:
+                name: calico
+              pods:
+                cidrBlocks:
+                  - ${input.clPodCidrBlock}
+              services:
+                cidrBlocks:
+                  - ${input.clServicesCiderBlock}
+  k8sns:
+    type: CCI.TKG.Resource
+    metadata:
+      layoutPosition:
+        - 0
+        - 0
+    properties:
+      context: ${resource.cciTKC.id}
+      manifest:
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: ${env.deploymentName}-k8s-ns
+          labels:
+            app: ${env.deploymentName}
+            pod-security.kubernetes.io/enforce: privileged
+  vsphere-password-secret:
+    type: CCI.TKG.Resource
+    metadata:
+      layoutPosition:
+        - 0
+        - 1
+    properties:
+      context: ${resource.k8sns.id}
+      manifest:
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: vsphere-password
+        type: Opaque
+        stringData:
+          VSPHERE_PASSWORD: ${input.vSpherePassword}
+  hfTokenSecret:
+    type: CCI.TKG.Resource
+    metadata:
+      layoutPosition:
+        - 0
+        - 0
+    properties:
+      context: ${resource.k8sns.id}
+      manifest:
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: hf-token
+        type: Opaque
+        stringData:
+          HFTOKEN: ${input.hfToken}
+  opea-lb:
+    type: CCI.TKG.Resource
+    metadata:
+      layoutPosition:
+        - 1
+        - 0
+    properties:
+      context: ${resource.k8sns.id}
+      wait:
+        fields:
+          - indicatesFailure: false
+            path: status.loadBalancer.ingress[0].ip
+            value: '*'
+      manifest:
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: opea-lb
+        spec:
+          type: LoadBalancer
+          selector:
+            app.kubernetes.io/instance: '${input.apiBackend ? ''xeon-llama-8b'' : ''chatqna'' }'
+            app.kubernetes.io/name: '${input.apiBackend ? ''vllm'' : ''nginx'' }'
+          ports:
+            - name: http
+              protocol: TCP
+              port: 80
+              targetPort: '${input.apiBackend ? 2080 : 80 }'
+  helmLB:
+    type: CCI.TKG.Resource
+    metadata:
+      layoutPosition:
+        - 2
+        - 0
+    properties:
+      context: ${resource.k8sns.id}
+      wait:
+        fields:
+          - indicatesFailure: false
+            path: status.loadBalancer.ingress[0].ip
+            value: '*'
+      manifest:
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: docker-helm-lb
+        spec:
+          selector:
+            app: docker-helm
+          type: LoadBalancer
+          ports:
+            - name: tcp-2222
+              port: 2222
+              targetPort: 22
+              protocol: TCP
+  docker-helm:
+    type: CCI.TKG.Resource
+    dependsOn:
+      - helmLB
+      - vsphere-password-secret
+      - hfTokenSecret
+    metadata:
+      layoutPosition:
+        - 3
+        - 0
+    properties:
+      context: ${resource.k8sns.id}
+      manifest:
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: docker-helm
+          labels:
+            app: docker-helm
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: docker-helm
+          template:
+            metadata:
+              labels:
+                app: docker-helm
+            spec:
+              containers:
+                - name: docker-helm
+                  image: ${input.dockerHelmImage}
+                  ports:
+                    - containerPort: 22
+                      protocol: TCP
+                  env:
+                    - name: HFTOKEN
+                      valueFrom:
+                        secretKeyRef:
+                          name: hf-token
+                          key: HFTOKEN
+                    - name: VSPHERE_USERNAME
+                      value: ${env.requestedBy}
+                    - name: VSPHERE_PASSWORD
+                      valueFrom:
+                        secretKeyRef:
+                          name: vsphere-password
+                          key: VSPHERE_PASSWORD
+                    - name: VKS_SUPERVISOR_IP
+                      value: 192.168.240.2
+                    - name: VKS_NAMESPACE
+                      value: ${resource.cciNamespace.name}
+                    - name: VKS_CLUSTER_NAME
+                      value: ${resource.cciTKC.manifest.metadata.name}
+                    - name: K8S_NAMESPACE
+                      value: ${resource.k8sns.manifest.metadata.name}
+                    - name: OPEAVER
+                      value: ${input.opeaVersion}
+                    - name: HFMODEL
+                      value: ${input.hfModel}
+                    - name: APIBACKEND
+                      value: ${input.apiBackend + ''}
+outputs:
+  __deploymentOverview:
+    value: |-
+
+      ## Access the OPEA Q&A Chatbot, or point external front ends to the following:
+      - http://{{resource.opea-lb.object.status.loadBalancer.ingress.[0].ip}}
+
+      ## Troubleshoot things...
+      - check the dockerhelm pod logs for errors.
+
+      ### Kubernetes
+      - Login to Kubernetes via `kubectl`
+          ```
+          kubectl vsphere login --insecure-skip-tls-verify \
+          --server={{resource.cciNamespace.metadata.[infrastructure.cci.vmware.com/wcp-address]}} \
+          --tanzu-kubernetes-cluster-namespace ${resource.cciNamespace.name} \
+          --tanzu-kubernetes-cluster-name ${resource.cciTKC.manifest.metadata.name} \
+          --vsphere-username ${env.requestedBy}
+          ```
+      - Manage Kubernetes and Supervisor Namespace via [Cloud Consumption Interface](/automation/#/service/catalog/consume/cci/projects/${env.projectName}/namespaces/${resource.cciNamespace.name}/summary)
+
+      ### SSH
+      - ssh into the helm container:
+      ```
+      ssh -p 2222 root@{{resource.helmLB.object.status.loadBalancer.ingress.[0].ip}}
+      ```
+
+      ### helm
+      - Run the helm commands
+      ```
+      GenAIInfra/helm-charts/scripts/update_dependency.sh
+      helm dependency update GenAIInfra/helm-charts/chatqna
+      export HFTOKEN="<changeme>"
+      export MODELDIR=""
+      export MODELNAME="meta-llama/Meta-Llama-3-8B-Instruct"
+
+      helm install chatqna GenAIInfra/helm-charts/chatqna \
+      --set global.HUGGINGFACEHUB_API_TOKEN=$\{HFTOKEN} \
+      --set global.modelUseHostPath=$\{MODELDIR} \
+      --set vllm.LLM_MODEL_ID=$\{MODELNAME} \
+      --namespace ${env.deploymentName}-k8s-ns
+      ```
