@@ -1,0 +1,172 @@
+formatVersion: 2
+metadata:
+  deploymentSettings:
+    disableUpdateDay2Action: true
+inputs:
+  vSpherePassword:
+    type: string
+    title: vSphere Password
+    description: vSphere password
+    encrypted: true
+  dockerHelmImage:
+    type: string
+    title: Docker helm image
+    default: thephuck/docker-helm:gaudi-v0.3
+  projectName:
+    type: string
+    title: Existing project name
+    description: The helm chart will be deployed into the existing cluster in a project
+  k8sNS:
+    type: string
+    title: Kubernetes namespace
+    description: Provide a name to build the deployment inside a k8s namespace
+    default: habana-ai-operator
+  CHARTNAME:
+    type: string
+    title: Helm Chart
+    description: 'chart name and location, example: habana-ai-operator gaudi-helm/habana-ai-operator'
+    default: habana-ai-operator gaudi-helm/habana-ai-operator
+  CHARTREPO:
+    type: string
+    title: Chart Repot
+    description: 'Project and URL: gaudi-helm https://vault.habana.ai/artifactory/api/helm/gaudi-helm'
+    default: gaudi-helm https://vault.habana.ai/artifactory/api/helm/gaudi-helm
+  CHARTVERSION:
+    type: string
+    title: Chart version
+    description: 1.21.0-555
+    default: 1.21.0-555
+resources:
+  cciNamespace:
+    type: CCI.Supervisor.Namespace
+    properties:
+      name: ${input.projectName}-ns
+      existing: true
+  cciTKC:
+    type: CCI.Supervisor.Resource
+    properties:
+      context: ${resource.cciNamespace.id}
+      existing: true
+      manifest:
+        apiVersion: run.tanzu.vmware.com/v1alpha3
+        kind: TanzuKubernetesCluster
+        metadata:
+          name: ${input.projectName}-cl
+  k8sns:
+    type: CCI.TKG.Resource
+    properties:
+      context: ${resource.cciTKC.id}
+      manifest:
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: ${input.k8sNS}
+          labels:
+            app: ${env.deploymentName}
+            pod-security.kubernetes.io/enforce: privileged
+  vsphere-password-secret:
+    type: CCI.TKG.Resource
+    properties:
+      context: ${resource.k8sns.id}
+      manifest:
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: vsphere-password
+        type: Opaque
+        stringData:
+          VSPHERE_PASSWORD: ${input.vSpherePassword}
+  helmLB:
+    type: CCI.TKG.Resource
+    properties:
+      context: ${resource.k8sns.id}
+      wait:
+        fields:
+          - indicatesFailure: false
+            path: status.loadBalancer.ingress[0].ip
+            value: '*'
+      manifest:
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: docker-helm-lb
+        spec:
+          selector:
+            app: docker-helm
+          type: LoadBalancer
+          ports:
+            - name: tcp-2222
+              port: 2222
+              targetPort: 22
+              protocol: TCP
+  docker-helm:
+    type: CCI.TKG.Resource
+    dependsOn:
+      - helmLB
+      - vsphere-password-secret
+    properties:
+      context: ${resource.k8sns.id}
+      manifest:
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: docker-helm
+          labels:
+            app: docker-helm
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: docker-helm
+          template:
+            metadata:
+              labels:
+                app: docker-helm
+            spec:
+              containers:
+                - name: docker-helm
+                  image: ${input.dockerHelmImage}
+                  ports:
+                    - containerPort: 22
+                      protocol: TCP
+                  env:
+                    - name: VSPHERE_USERNAME
+                      value: ${env.requestedBy}
+                    - name: VSPHERE_PASSWORD
+                      valueFrom:
+                        secretKeyRef:
+                          name: vsphere-password
+                          key: VSPHERE_PASSWORD
+                    - name: VKS_SUPERVISOR_IP
+                      value: 192.168.240.2
+                    - name: VKS_NAMESPACE
+                      value: ${resource.cciNamespace.name}
+                    - name: VKS_CLUSTER_NAME
+                      value: ${resource.cciTKC.manifest.metadata.name}
+                    - name: K8S_NAMESPACE
+                      value: ${resource.k8sns.manifest.metadata.name}
+                    - name: CHARTVERSION
+                      value: ${input.CHARTVERSION}
+                    - name: CHARTNAME
+                      value: ${input.CHARTNAME}
+                    - name: CHARTREPO
+                      value: ${input.CHARTREPO}
+outputs:
+  __deploymentOverview:
+    value: |-
+      ### Kubernetes
+      - Login to Kubernetes via `kubectl`
+          ```
+          kubectl vsphere login --insecure-skip-tls-verify \
+          --server={{resource.cciNamespace.metadata.[infrastructure.cci.vmware.com/wcp-address]}} \
+          --tanzu-kubernetes-cluster-namespace ${resource.cciNamespace.name} \
+          --tanzu-kubernetes-cluster-name ${resource.cciTKC.manifest.metadata.name} \
+          --vsphere-username ${env.requestedBy}
+          ```
+      - Manage Kubernetes and Supervisor Namespace via [Cloud Consumption Interface](/automation/#/service/catalog/consume/cci/projects/${env.projectName}/namespaces/${resource.cciNamespace.name}/summary)
+
+      ### SSH
+      - ssh into the helm container:
+      ```
+      ssh -p 2222 root@{{resource.helmLB.object.status.loadBalancer.ingress.[0].ip}}
+      ```
