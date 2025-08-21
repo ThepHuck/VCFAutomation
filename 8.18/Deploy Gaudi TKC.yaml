@@ -1,0 +1,139 @@
+formatVersion: 2
+metadata:
+  deploymentSettings:
+    disableUpdateDay2Action: true
+    hideDisabledDay2Actions: true
+inputs:
+  clCPCount:
+    type: integer
+    title: How many control plane nodes?
+    enum:
+      - 1
+      - 3
+  clCPSize:
+    type: string
+    title: Control plane size
+    description: |-
+      xsmall = 2/2
+      small = 2/4
+      medium = 2/8
+      large = 4/16
+    readOnly: false
+    default: best-effort-xsmall
+    minLength: 1
+    enum:
+      - best-effort-xsmall
+      - best-effort-small
+      - best-effort-medium
+      - best-effort-large
+  clWorkerCount:
+    type: integer
+    title: How many worker nodes?
+    enum:
+      - 1
+      - 2
+      - 3
+      - 4
+  clWorkerSize:
+    type: string
+    title: Worker node size
+    description: |-
+      2xlarge = 8/64
+      4xlarge = 16/128
+      8xlarge = 32/128
+    readOnly: false
+    default: best-effort-2xlarge
+    enum:
+      - best-effort-2xlarge
+      - best-effort-4xlarge
+      - best-effort-8xlarge
+      - 16c-128g-lat-sensitive
+      - 16c-256g-lat-sensitive
+  clStorage:
+    type: integer
+    title: Cluster Additional Storage in GiB
+    default: 200
+    minimum: 10
+    maximum: 5000
+  clPodCidrBlock:
+    type: string
+    title: Cluster Pod IP Block
+    description: subnet in CIDR notation
+    default: 10.53.0.0/16
+    pattern: ^([0-9]{1,3}\.)([0-9]{1,3}\.)([0-9]{1,3}\.)([0-9]{1,3}\/)([1-9]{1,2})
+  clServicesCiderBlock:
+    type: string
+    title: Services IP block
+    description: subnet in CIDR notation
+    default: 10.153.0.0/16
+    pattern: ^([0-9]{1,3}\.)([0-9]{1,3}\.)([0-9]{1,3}\.)([0-9]{1,3}\/)([1-9]{1,2})
+resources:
+  cciNamespace:
+    type: CCI.Supervisor.Namespace
+    properties:
+      name: ${env.deploymentName}-ns
+      className: cci-ns-class
+      regionName: cci-region
+  cciTKC:
+    type: CCI.Supervisor.Resource
+    dependsOn:
+      - cciNamespace
+    properties:
+      context: ${resource.cciNamespace.id}
+      manifest:
+        apiVersion: run.tanzu.vmware.com/v1alpha3
+        kind: TanzuKubernetesCluster
+        metadata:
+          name: ${env.deploymentName}-cl
+          annotations:
+            run.tanzu.vmware.com/resolve-os-image: os-name=ubuntu
+        spec:
+          topology:
+            controlPlane:
+              replicas: ${input.clCPCount}
+              vmClass: ${input.clCPSize}
+              storageClass: tanzu-storage-policy
+              tkr:
+                reference:
+                  name: v1.30.1---vmware.1-fips-tkg.5
+            nodePools:
+              - name: worker
+                replicas: ${input.clWorkerCount}
+                vmClass: ${input.clWorkerSize}
+                storageClass: tanzu-storage-policy
+                volumes:
+                  - name: containerd
+                    mountPath: /var/lib/containerd
+                    capacity:
+                      storage: 200Gi
+                # Larger space for pod content if needed
+                  - name: kubelet
+                    mountPath: /var/lib/kubelet
+                    capacity:
+                      storage: ${input.clStorage}Gi
+                tkr:
+                  reference:
+                    name: v1.30.1---vmware.1-fips-tkg.5
+          settings:
+            network:
+              cni:
+                name: calico
+              pods:
+                cidrBlocks:
+                  - ${input.clPodCidrBlock}
+              services:
+                cidrBlocks:
+                  - ${input.clServicesCiderBlock}
+outputs:
+  __deploymentOverview:
+    value: |-
+      ### Kubernetes
+      - Login to Kubernetes via `kubectl`
+          ```
+          kubectl vsphere login --insecure-skip-tls-verify \
+          --server={{resource.cciNamespace.metadata.[infrastructure.cci.vmware.com/wcp-address]}} \
+          --tanzu-kubernetes-cluster-namespace ${resource.cciNamespace.name} \
+          --tanzu-kubernetes-cluster-name ${resource.cciTKC.manifest.metadata.name} \
+          --vsphere-username ${env.requestedBy}
+          ```
+      - Manage Kubernetes and Supervisor Namespace via [Cloud Consumption Interface](/automation/#/service/catalog/consume/cci/projects/${env.projectName}/namespaces/${resource.cciNamespace.name}/summary)
