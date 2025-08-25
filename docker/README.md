@@ -5,4 +5,4 @@ docker-helm - this folder is specific to Intel's XEON AMX accelerator for [OPEA 
 - [docker hub](https://hub.docker.com/repository/docker/thephuck/docker-helm/general)
 
 docker-helm-gaudi
-- uses same Dockerfile as AMX, but has a separate run-gaudi.sh file
+- updated OPEA Dockerfile and separate run-gaudi.sh file
